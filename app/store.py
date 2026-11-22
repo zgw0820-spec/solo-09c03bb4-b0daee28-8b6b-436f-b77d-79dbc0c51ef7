@@ -1,12 +1,12 @@
 """批次存储:原子发布、编号、注册表持久化与崩溃恢复。
 
 目录布局(data_dir):
-  batches/<id>/manifest.json   新清单
-  batches/<id>/shard_*.npy     新分片
+  batches/<id>/manifest.json   新清单(含 params 参数清单与新分片边界)
+  batches/<id>/shard_*.npy     新分片(边界与模板一致)
   batches/.staging-<id>/       转换中的暂存目录(启动时清理)
   registry.json                {"next_id": N, "batches": {"<id>": meta}}
 
-发布流程:转换写入暂存目录 -> 全部文件齐备并 fsync -> os.rename 成
+发布流程:迁移写入暂存目录 -> 全部文件齐备并 fsync -> os.rename 成
 batches/<id> -> 更新注册表。任何一步中断都不会产生"半个批次",
 网页始终只看到上次成功发布的批次;重启后旧批次仍凭编号可取。
 """
@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .manifest import ManifestError, load_and_validate
-from .reshard import convert
+from .reshard import reshard
 
 
 def _fsync_dir(path: Path) -> None:
@@ -93,8 +93,10 @@ class BatchStore:
             "created_at": created,
             "step": m.step,
             "total_params": m.total_params,
-            "processes": len(m.shards),
+            "shards": len(m.shards),
+            "params": len(m.params),
             "source": "(重启后从目录恢复)",
+            "template": "(重启后从目录恢复)",
         }
 
     def _save_registry(self) -> None:
@@ -145,10 +147,16 @@ class BatchStore:
 
     # ---------- 发布 ----------
 
-    def create_batch(self, checkpoint_manifest: Path, processes: int, source: str) -> dict:
-        """转换并原子发布一个批次;失败时清理暂存目录,不影响既有批次。
+    def create_batch(
+        self,
+        old_manifest: Path,
+        template_manifest: Path,
+        source: str,
+        template: str,
+    ) -> dict:
+        """按模板迁移旧检查点并原子发布一个批次;失败清理暂存,不影响既有批次。
 
-        编号在转换前即消耗掉,保证并发转换各自独占暂存目录;
+        编号在转换前即消耗掉,保证并发迁移各自独占暂存目录;
         失败的编号会留空,不影响旧批次凭编号取用。
         """
         with self._lock:
@@ -157,7 +165,7 @@ class BatchStore:
         staging = self.batches_dir / f".staging-{batch_id}"
         final = self.batches_dir / str(batch_id)
         try:
-            out_manifest = convert(checkpoint_manifest, staging, processes)
+            out_manifest = reshard(old_manifest, template_manifest, staging)
         except BaseException:
             shutil.rmtree(staging, ignore_errors=True)
             raise
@@ -170,8 +178,10 @@ class BatchStore:
             "created_at": datetime.now(timezone.utc).isoformat(),
             "step": out_manifest["step"],
             "total_params": out_manifest["total_params"],
-            "processes": processes,
+            "shards": len(out_manifest["shards"]),
+            "params": len(out_manifest["params"]),
             "source": source,
+            "template": template,
         }
         with self._lock:
             self._batches[str(batch_id)] = meta

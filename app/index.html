@@ -2,9 +2,9 @@
 <html lang="zh">
 <head>
 <meta charset="utf-8">
-<title>Adam 检查点重分片</title>
+<title>Adam 检查点参数迁移</title>
 <style>
-  body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 960px; color: #222; }
+  body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 1020px; color: #222; }
   h1 { font-size: 1.4rem; } h2 { font-size: 1.1rem; margin-top: 2rem; }
   table { border-collapse: collapse; width: 100%; margin-top: .5rem; }
   th, td { border: 1px solid #ccc; padding: .35rem .6rem; text-align: left; font-size: .9rem; }
@@ -17,30 +17,35 @@
 </style>
 </head>
 <body>
-<h1>Adam 检查点重分片</h1>
-<p class="muted">从挂载目录选择源检查点,填目标进程数(每进程一片,按全局下标连续均分,最多相差 1)。</p>
+<h1>Adam 检查点参数迁移(层重排 / 共享权重)</h1>
+<p class="muted">
+  从挂载目录选择<strong>旧检查点</strong>与<strong>新模型初始化模板</strong>。
+  每份清单含参数名、形状与全局下标区间;按 (参数名, 形状) 继承旧权重,
+  找不到则保留模板初值,共享区间多份旧权原位值不一致时报冲突。
+  新批次沿用模板分片边界,训练步与两阶 Adam 矩归零。
+</p>
 
-<h2>源检查点</h2>
+<h2>挂载目录中的检查点 / 模板</h2>
 <table id="ckpts"><thead><tr>
-  <th>路径</th><th>训练步</th><th>参数总数</th><th>片数</th><th>状态</th>
+  <th>路径</th><th>训练步</th><th>参数总数</th><th>参数条数</th><th>片数</th><th>状态</th>
 </tr></thead><tbody></tbody></table>
 
-<h2>发起转换</h2>
+<h2>发起迁移</h2>
 <form id="conv">
-  <label>检查点 <select id="ckpt" required></select></label>
-  <label>进程数 <input id="procs" type="number" min="1" value="4" required></label>
-  <button type="submit">开始转换</button>
+  <label>旧检查点 <select id="ckpt" required></select></label>
+  <label>新模型模板 <select id="tpl" required></select></label>
+  <button type="submit">开始迁移</button>
 </form>
 <div id="msg"></div>
 
-<h2>转换任务</h2>
+<h2>迁移任务</h2>
 <table id="jobs"><thead><tr>
-  <th>任务</th><th>检查点</th><th>进程数</th><th>状态</th><th>批次/错误</th>
+  <th>任务</th><th>旧检查点</th><th>模板</th><th>状态</th><th>批次 / 失败原因</th>
 </tr></thead><tbody></tbody></table>
 
 <h2>已发布批次</h2>
 <table id="batches"><thead><tr>
-  <th>编号</th><th>发布时间 (UTC)</th><th>训练步</th><th>参数总数</th><th>片数</th><th>来源</th><th>下载</th>
+  <th>编号</th><th>发布时间 (UTC)</th><th>训练步</th><th>参数总数</th><th>参数条数</th><th>片数</th><th>旧检查点</th><th>模板</th><th>下载</th>
 </tr></thead><tbody></tbody></table>
 
 <script>
@@ -50,20 +55,25 @@ const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':
 async function refreshCheckpoints() {
   const r = await fetch('/api/checkpoints'); const d = await r.json();
   const tb = document.querySelector('#ckpts tbody'); tb.innerHTML = '';
-  const sel = $('ckpt'); const cur = sel.value; sel.innerHTML = '';
+  const selCk = $('ckpt'), selTpl = $('tpl');
+  const curCk = selCk.value, curTpl = selTpl.value;
+  selCk.innerHTML = ''; selTpl.innerHTML = '';
   for (const c of d.checkpoints) {
     const tr = document.createElement('tr');
     tr.innerHTML = c.valid
-      ? `<td>${esc(c.path)}</td><td>${c.step}</td><td>${c.total_params}</td><td>${c.shards}</td><td class="ok">可用</td>`
-      : `<td>${esc(c.path)}</td><td colspan="3"></td><td class="bad">${esc(c.error)}</td>`;
+      ? `<td>${esc(c.path)}</td><td>${c.step}</td><td>${c.total_params}</td><td>${c.params}</td><td>${c.shards}</td><td class="ok">可用</td>`
+      : `<td>${esc(c.path)}</td><td colspan="4"></td><td class="bad">${esc(c.error)}</td>`;
     tb.appendChild(tr);
     if (c.valid) {
-      const o = document.createElement('option');
-      o.value = c.path; o.textContent = `${c.path} (步 ${c.step}, ${c.total_params} 参数, ${c.shards} 片)`;
-      sel.appendChild(o);
+      const label = `${c.path} (步 ${c.step}, ${c.total_params} 下标, ${c.params} 参数, ${c.shards} 片)`;
+      const o1 = document.createElement('option');
+      o1.value = c.path; o1.textContent = label; selCk.appendChild(o1);
+      const o2 = document.createElement('option');
+      o2.value = c.path; o2.textContent = label; selTpl.appendChild(o2);
     }
   }
-  if (cur) sel.value = cur;
+  if (curCk) selCk.value = curCk;
+  if (curTpl) selTpl.value = curTpl;
 }
 
 async function refreshJobs() {
@@ -75,7 +85,7 @@ async function refreshJobs() {
              : j.status === 'failed' ? '<span class="bad">失败</span>' : '进行中…';
     const tail = j.status === 'done' ? `批次 #${j.batch_id}`
                : j.status === 'failed' ? `<span class="bad">${esc(j.error)}</span>` : '';
-    tr.innerHTML = `<td>${esc(j.id)}</td><td>${esc(j.checkpoint)}</td><td>${j.processes}</td><td>${st}</td><td>${tail}</td>`;
+    tr.innerHTML = `<td>${esc(j.id)}</td><td>${esc(j.checkpoint)}</td><td>${esc(j.template)}</td><td>${st}</td><td>${tail}</td>`;
     tb.appendChild(tr);
   }
 }
@@ -86,7 +96,8 @@ async function refreshBatches() {
   for (const b of d.batches) {
     const tr = document.createElement('tr');
     tr.innerHTML = `<td>#${b.id}</td><td>${esc(b.created_at)}</td><td>${b.step}</td>
-      <td>${b.total_params}</td><td>${b.processes}</td><td>${esc(b.source)}</td>
+      <td>${b.total_params}</td><td>${b.params}</td><td>${b.shards}</td>
+      <td>${esc(b.source)}</td><td>${esc(b.template)}</td>
       <td><a href="/api/batches/${b.id}/download">tar.gz</a>
           <a href="/api/batches/${b.id}/manifest.json">清单</a></td>`;
     tb.appendChild(tr);
@@ -96,9 +107,13 @@ async function refreshBatches() {
 $('conv').addEventListener('submit', async e => {
   e.preventDefault();
   const msg = $('msg'); msg.textContent = '';
+  if ($('ckpt').value === $('tpl').value) {
+    msg.innerHTML = '<span class="bad">旧检查点与模板不能选择同一份清单</span>';
+    return;
+  }
   const r = await fetch('/api/convert', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({checkpoint: $('ckpt').value, processes: Number($('procs').value)}),
+    body: JSON.stringify({checkpoint: $('ckpt').value, template: $('tpl').value}),
   });
   const d = await r.json();
   if (r.ok) { msg.innerHTML = `<span class="ok">已提交 ${esc(d.job_id)}</span>`; }

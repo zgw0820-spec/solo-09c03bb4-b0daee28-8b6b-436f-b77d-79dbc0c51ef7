@@ -12,5 +12,23 @@
       "start": 5,
       "end": 10
     }
+  ],
+  "params": [
+    {
+      "name": "a.weight",
+      "shape": [
+        6
+      ],
+      "start": 0,
+      "end": 6
+    },
+    {
+      "name": "b.bias",
+      "shape": [
+        4
+      ],
+      "start": 6,
+      "end": 10
+    }
   ]
 }

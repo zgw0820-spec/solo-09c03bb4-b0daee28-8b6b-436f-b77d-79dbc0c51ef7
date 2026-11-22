@@ -1,0 +1,68 @@
+{
+  "step": 0,
+  "total_params": 30,
+  "shards": [
+    {
+      "file": "shard_000.npy",
+      "start": 0,
+      "end": 15
+    },
+    {
+      "file": "shard_001.npy",
+      "start": 15,
+      "end": 30
+    }
+  ],
+  "params": [
+    {
+      "name": "tied.input_proj",
+      "shape": [
+        2,
+        4
+      ],
+      "start": 0,
+      "end": 8
+    },
+    {
+      "name": "tied.output_proj",
+      "shape": [
+        2,
+        4
+      ],
+      "start": 0,
+      "end": 8
+    },
+    {
+      "name": "embed.token",
+      "shape": [
+        8
+      ],
+      "start": 8,
+      "end": 16
+    },
+    {
+      "name": "embed.position",
+      "shape": [
+        4
+      ],
+      "start": 16,
+      "end": 20
+    },
+    {
+      "name": "head.bias",
+      "shape": [
+        2
+      ],
+      "start": 20,
+      "end": 22
+    },
+    {
+      "name": "pad.fill",
+      "shape": [
+        8
+      ],
+      "start": 22,
+      "end": 30
+    }
+  ]
+}

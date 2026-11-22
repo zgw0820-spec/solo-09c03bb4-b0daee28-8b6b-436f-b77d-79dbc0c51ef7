@@ -1,4 +1,8 @@
-"""FastAPI 网页:从挂载目录选检查点、填进程数,重分 Adam 检查点并发布批次。"""
+"""FastAPI 网页:从挂载目录选旧检查点与新模型模板,迁移并发布批次。
+
+新模型重排了层、并把原先独立的参数改成共享权重。每份检查点/模板都附
+参数名、形状与全局下标区间清单(params)。迁移规则见 app/reshard.py。
+"""
 from __future__ import annotations
 
 import io
@@ -23,8 +27,8 @@ MAX_JOBS_KEPT = 100
 
 
 class ConvertRequest(BaseModel):
-    checkpoint: str = Field(..., description="挂载目录内检查点目录的相对路径")
-    processes: int = Field(..., ge=1, description="目标进程数(每进程一片)")
+    checkpoint: str = Field(..., description="挂载目录内旧检查点目录的相对路径")
+    template: str = Field(..., description="挂载目录内新模型初始化模板目录的相对路径")
 
 
 def create_app(checkpoints_dir: str | Path | None = None,
@@ -32,7 +36,7 @@ def create_app(checkpoints_dir: str | Path | None = None,
     ckpts = Path(checkpoints_dir or os.environ.get("CHECKPOINTS_DIR", "/checkpoints"))
     store = BatchStore(data_dir or os.environ.get("DATA_DIR", "/data"))
 
-    app = FastAPI(title="Adam 检查点重分片")
+    app = FastAPI(title="Adam 检查点参数迁移")
     jobs: dict[str, dict] = {}
     jobs_lock = threading.Lock()
     job_counter = itertools.count(1)
@@ -43,7 +47,19 @@ def create_app(checkpoints_dir: str | Path | None = None,
     def index() -> str:
         return INDEX_HTML
 
-    # ---------- 源检查点 ----------
+    # ---------- 挂载目录中的检查点 / 模板 ----------
+
+    def _resolve_manifest(rel: str) -> Path:
+        """把相对路径解析为挂载目录内的 manifest.json,拒绝越界与缺失。"""
+        base = ckpts.resolve()
+        target = (base / rel).resolve()
+        if not target.is_relative_to(base):
+            raise HTTPException(400, "路径必须位于挂载目录内")
+        if target.is_dir():
+            target = target / "manifest.json"
+        if not target.is_file():
+            raise HTTPException(404, f"找不到清单: {rel}")
+        return target
 
     @app.get("/api/checkpoints")
     def list_checkpoints() -> dict:
@@ -57,39 +73,40 @@ def create_app(checkpoints_dir: str | Path | None = None,
                     out.append({
                         "path": rel, "valid": True, "step": m.step,
                         "total_params": m.total_params, "shards": len(m.shards),
+                        "params": len(m.params),
                     })
                 except (ManifestError, OSError) as e:
                     out.append({"path": rel, "valid": False, "error": str(e)})
         return {"checkpoints_dir": str(base), "checkpoints": out}
 
-    # ---------- 转换任务 ----------
+    # ---------- 迁移任务 ----------
 
     @app.post("/api/convert", status_code=202)
     def start_convert(req: ConvertRequest) -> dict:
-        base = ckpts.resolve()
-        target = (base / req.checkpoint).resolve()
-        if not target.is_relative_to(base):
-            raise HTTPException(400, "checkpoint 必须位于挂载目录内")
-        if target.is_dir():
-            target = target / "manifest.json"
-        if not target.is_file():
-            raise HTTPException(404, f"找不到清单: {req.checkpoint}")
+        old_manifest = _resolve_manifest(req.checkpoint)
+        template_manifest = _resolve_manifest(req.template)
+        if old_manifest == template_manifest:
+            raise HTTPException(400, "旧检查点与模板不能选择同一份清单")
 
         job_id = f"job-{next(job_counter)}"
         with jobs_lock:
             while len(jobs) >= MAX_JOBS_KEPT:  # 淘汰最旧的任务记录
                 jobs.pop(next(iter(jobs)))
             jobs[job_id] = {
-                "id": job_id, "status": "running", "checkpoint": req.checkpoint,
-                "processes": req.processes, "batch_id": None, "error": None,
+                "id": job_id, "status": "running",
+                "checkpoint": req.checkpoint, "template": req.template,
+                "batch_id": None, "error": None,
             }
 
         def run() -> None:
             try:
-                meta = store.create_batch(target, req.processes, source=req.checkpoint)
+                meta = store.create_batch(
+                    old_manifest, template_manifest,
+                    source=req.checkpoint, template=req.template,
+                )
                 with jobs_lock:
                     jobs[job_id].update(status="done", batch_id=meta["id"])
-            except Exception as e:  # 转换失败不影响既有批次
+            except Exception as e:  # 迁移失败不影响既有批次
                 with jobs_lock:
                     jobs[job_id].update(status="failed", error=str(e))
 
