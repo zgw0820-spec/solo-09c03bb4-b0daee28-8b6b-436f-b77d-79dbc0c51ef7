@@ -1,0 +1,12 @@
+services:
+  reshaper:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./sample_data/checkpoints:/checkpoints:ro   # 挂载源检查点目录(只读)
+      - reshaper-data:/data                          # 批次持久化,重启后旧批次仍在
+    restart: unless-stopped
+
+volumes:
+  reshaper-data:

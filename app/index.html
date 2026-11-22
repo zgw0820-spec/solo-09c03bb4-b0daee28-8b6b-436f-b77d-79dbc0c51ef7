@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>Adam 检查点重分片</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 960px; color: #222; }
+  h1 { font-size: 1.4rem; } h2 { font-size: 1.1rem; margin-top: 2rem; }
+  table { border-collapse: collapse; width: 100%; margin-top: .5rem; }
+  th, td { border: 1px solid #ccc; padding: .35rem .6rem; text-align: left; font-size: .9rem; }
+  th { background: #f3f3f3; }
+  .bad { color: #b00; } .ok { color: #080; }
+  form { margin: 1rem 0; display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; }
+  select, input, button { font-size: .95rem; padding: .3rem .5rem; }
+  #msg { margin: .5rem 0; min-height: 1.2em; }
+  .muted { color: #777; font-size: .85rem; }
+</style>
+</head>
+<body>
+<h1>Adam 检查点重分片</h1>
+<p class="muted">从挂载目录选择源检查点,填目标进程数(每进程一片,按全局下标连续均分,最多相差 1)。</p>
+
+<h2>源检查点</h2>
+<table id="ckpts"><thead><tr>
+  <th>路径</th><th>训练步</th><th>参数总数</th><th>片数</th><th>状态</th>
+</tr></thead><tbody></tbody></table>
+
+<h2>发起转换</h2>
+<form id="conv">
+  <label>检查点 <select id="ckpt" required></select></label>
+  <label>进程数 <input id="procs" type="number" min="1" value="4" required></label>
+  <button type="submit">开始转换</button>
+</form>
+<div id="msg"></div>
+
+<h2>转换任务</h2>
+<table id="jobs"><thead><tr>
+  <th>任务</th><th>检查点</th><th>进程数</th><th>状态</th><th>批次/错误</th>
+</tr></thead><tbody></tbody></table>
+
+<h2>已发布批次</h2>
+<table id="batches"><thead><tr>
+  <th>编号</th><th>发布时间 (UTC)</th><th>训练步</th><th>参数总数</th><th>片数</th><th>来源</th><th>下载</th>
+</tr></thead><tbody></tbody></table>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+async function refreshCheckpoints() {
+  const r = await fetch('/api/checkpoints'); const d = await r.json();
+  const tb = document.querySelector('#ckpts tbody'); tb.innerHTML = '';
+  const sel = $('ckpt'); const cur = sel.value; sel.innerHTML = '';
+  for (const c of d.checkpoints) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = c.valid
+      ? `<td>${esc(c.path)}</td><td>${c.step}</td><td>${c.total_params}</td><td>${c.shards}</td><td class="ok">可用</td>`
+      : `<td>${esc(c.path)}</td><td colspan="3"></td><td class="bad">${esc(c.error)}</td>`;
+    tb.appendChild(tr);
+    if (c.valid) {
+      const o = document.createElement('option');
+      o.value = c.path; o.textContent = `${c.path} (步 ${c.step}, ${c.total_params} 参数, ${c.shards} 片)`;
+      sel.appendChild(o);
+    }
+  }
+  if (cur) sel.value = cur;
+}
+
+async function refreshJobs() {
+  const r = await fetch('/api/jobs'); const d = await r.json();
+  const tb = document.querySelector('#jobs tbody'); tb.innerHTML = '';
+  for (const j of d.jobs) {
+    const tr = document.createElement('tr');
+    const st = j.status === 'done' ? '<span class="ok">完成</span>'
+             : j.status === 'failed' ? '<span class="bad">失败</span>' : '进行中…';
+    const tail = j.status === 'done' ? `批次 #${j.batch_id}`
+               : j.status === 'failed' ? `<span class="bad">${esc(j.error)}</span>` : '';
+    tr.innerHTML = `<td>${esc(j.id)}</td><td>${esc(j.checkpoint)}</td><td>${j.processes}</td><td>${st}</td><td>${tail}</td>`;
+    tb.appendChild(tr);
+  }
+}
+
+async function refreshBatches() {
+  const r = await fetch('/api/batches'); const d = await r.json();
+  const tb = document.querySelector('#batches tbody'); tb.innerHTML = '';
+  for (const b of d.batches) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>#${b.id}</td><td>${esc(b.created_at)}</td><td>${b.step}</td>
+      <td>${b.total_params}</td><td>${b.processes}</td><td>${esc(b.source)}</td>
+      <td><a href="/api/batches/${b.id}/download">tar.gz</a>
+          <a href="/api/batches/${b.id}/manifest.json">清单</a></td>`;
+    tb.appendChild(tr);
+  }
+}
+
+$('conv').addEventListener('submit', async e => {
+  e.preventDefault();
+  const msg = $('msg'); msg.textContent = '';
+  const r = await fetch('/api/convert', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({checkpoint: $('ckpt').value, processes: Number($('procs').value)}),
+  });
+  const d = await r.json();
+  if (r.ok) { msg.innerHTML = `<span class="ok">已提交 ${esc(d.job_id)}</span>`; }
+  else { msg.innerHTML = `<span class="bad">${esc(d.detail || '提交失败')}</span>`; }
+  refreshJobs();
+});
+
+function refreshAll() { refreshCheckpoints(); refreshJobs(); refreshBatches(); }
+refreshAll(); setInterval(refreshAll, 2000);
+</script>
+</body>
+</html>

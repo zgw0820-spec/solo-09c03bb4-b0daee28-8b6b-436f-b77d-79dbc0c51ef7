@@ -1,0 +1,16 @@
+{
+  "step": 30,
+  "total_params": 10,
+  "shards": [
+    {
+      "file": "shard_000.npy",
+      "start": 0,
+      "end": 5
+    },
+    {
+      "file": "shard_001.npy",
+      "start": 5,
+      "end": 10
+    }
+  ]
+}

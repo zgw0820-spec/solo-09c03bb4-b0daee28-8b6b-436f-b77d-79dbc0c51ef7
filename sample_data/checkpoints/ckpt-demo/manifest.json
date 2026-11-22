@@ -1,0 +1,21 @@
+{
+  "step": 12000,
+  "total_params": 1000,
+  "shards": [
+    {
+      "file": "shard_000.npy",
+      "start": 0,
+      "end": 334
+    },
+    {
+      "file": "shard_001.npy",
+      "start": 334,
+      "end": 667
+    },
+    {
+      "file": "shard_002.npy",
+      "start": 667,
+      "end": 1000
+    }
+  ]
+}
